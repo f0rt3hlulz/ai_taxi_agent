@@ -1,9 +1,10 @@
 import operator
+import datetime
+import random
 from pydantic import BaseModel, Field
 from typing import Annotated, List
 from typing_extensions import TypedDict
 
-from langchain_community.document_loaders import WikipediaLoader
 from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, get_buffer_string
 from langchain_openai import ChatOpenAI
@@ -57,6 +58,90 @@ class ResearchAboutTrip(TypedDict):
     total_cost: int
 
 
+class TripDetails(BaseModel):
+    distance_km: float = Field(
+        description = "Calculated trip distance in km"
+    )
+    duration_mins: float = Field(
+        description = "Estimated trip duration in minutes"
+    )
+    prefered_route: str = Field(
+        description = "Recommended route based on condition"
+    )
+    traffic_condition: str = Field(
+        description = "Current traffic status"
+    )
+
+
+class PaymentReceipt(BaseModel):
+    base_fare: float = Field(
+        description = "Initial fare before extras"
+    )
+    distance_fare: float = Field(
+        description = "Cost per kilometer"
+    )
+    total: float = Field(
+        description = "Total amount to pay"
+    )
+
+
+def calculate_dynamic_pricing(state: GeneralInfoAboutTrip):
+    """Calculate fare based on distance and traffic conditions"""
+    base_fare = 3.00 # initial charge
+    per_km = 1.50 # cost per km
+    night_surcharge = 1.20 # 20% surcharge between 20:00-06:00
+
+    distance = _simulate_distance_calculation(
+        state["heading_from"],
+        state["destination"]
+    )
+
+    current_hour = datetime.datetime.now().hour
+    time_multiplier = night_surcharge if 20 <= current_hour <= 24 or 0 <= current_hour < 6 else 1.0
+    total = (base_fare + (distance * per_km)) * time_multiplier
+
+    return {
+        "approximate_cost": round(total, 2),
+        "distance_km": distance,
+        "time_multiplier": time_multiplier
+    }
+
+def _simulate_distance_calculation(start: str, end: str) -> float:
+    """simulate distance calculation between two points"""
+    # just random simulation for now
+    return random.uniform(2.0, 25.0)
+
+def suggest_routes(state: GeneralInfoAboutTrip):
+    """ suggest optimal routes with traffic awareness"""
+    routes = [
+        {"name": "Fastest", "time": "25 mins", "traffic": "light"},
+        {"name": "Scenic", "time": "35 mins", "traffic": "moderate"},
+        {"name": "Economy", "time": "30 mins", "traffic": "moderate"}
+    ]
+
+    best_route = min(routes, key=lambda x: int(x["time"].split()[0]))
+
+    return {
+        "prefered_route": best_route["name"],
+        "estimated_duration": best_route["time"],
+        "traffic_condition": best_route["traffic"]
+    }
+
+def process_payment(state: GeneralInfoAboutTrip):
+    """simulate payment processing"""
+    payment_methods = ["Credit Card", "Cash", "Mobile Pay"]
+    total = state["approximate_cost"]
+
+    return {
+        "payment_status": "completed",
+        "payment_method": random.choice(payment_methods),
+        "receipt": {
+            "base_fare": 3.00,
+            "distance_fare": round(total - 3.00, 2),
+            "total": total
+        }
+    }
+
 taxi_driver_instructions = """You are an AI agent roleplaying as a taxi driver. Follow these instructions:
 
 1. Understand the role:
@@ -108,19 +193,67 @@ def create_driver(state: GeneralInfoAboutTrip):
 
     return {"taxi_driver": taxi_driver.taxi_driver, "approximate_cost": taxi_driver.approximate_cost}
 
+
 def human_feedback(state: GeneralInfoAboutTrip):
-    """ node that should be interrupted on """
-    pass
+    """get human validation for critical decisions"""
+    print(f"suggested route: {state['prefered_route']}")
+    print(f"estimated cost: ${state['approximate_cost']}")
+    response = input("Approve trip details? (Y/n): ")
+
+    return {
+        "trip_approved": response.lower() == "y",
+        "human_approve": response
+    }
 
 
 # Add nodes and edges
 builder = StateGraph(ResearchAboutTrip)
 builder.add_node("create_taxi_driver", create_driver)
+builder.add_node("calculate_pricing", calculate_dynamic_pricing)
+builder.add_node("suggest_routes", suggest_routes)
+builder.add_node("process_payment", process_payment)
 builder.add_node("human_feedback", human_feedback)
 
 # Logic
-builder.add_edge(START, "create_taxi_driver")
-builder.add_edge("create_taxi_driver", "human_feedback")
+builder.set_entry_point("create_taxi_driver")
+builder.add_edge("create_taxi_driver", "calculate_pricing")
+builder.add_edge("calculate_pricing", "suggest_routes")
+builder.add_edge("suggest_routes", "process_payment")
+builder.add_edge("process_payment", "human_feedback")
 builder.add_edge("human_feedback", END)
+
+
+class EnchancedTaxiDriver(TaxiDriver):
+    conversation_history: List[str] = Field(
+        default_factory = list,
+        description = "Remember key points from current conversation"
+    )
+    passenger_preferences: dict = Field(
+        default_factory = dict,
+        description = "remember passenger preferences and choices"
+    )
+
+def update_conversation_memory(state: MessagesState):
+    """Maintain conversation context"""
+    last_message = state["messages"][-1].content
+    driver = state["taxi_driver"][0]
+
+    if "prefers" in last_message or "like to" in last_message:
+        driver.passenger_preferences.update(
+            _extract_preferences(last_message)
+        )
+
+    driver.conversation_history.append(last_message)
+    if len(driver.conversation_history) > 3:
+        driver.conversation_history.pop(0)
+
+    return {"taxi_driver": [driver]}
+
+def _extract_preferences(text: str) -> dict:
+    """extract passenger preferences from conversation"""
+    return {
+        "music_preference": "classic" if "classic" in text else "modern",
+        "conversation_style": "quiet" if "quiet" in text else "talkative"
+    }
 
 graph = builder.compile(interrupt_before=["human_feedback"])
